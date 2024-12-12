@@ -2,101 +2,80 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <time.h>
 
-volatile sig_atomic_t guessed = 0; // Флаг для отслеживания угаданного числа
-volatile sig_atomic_t guess = 0;    // Угаданное число
+int secret_number;
+pid_t child_pid;
+int attempts; // Переменная для отслеживания количества попыток
 
-// Обработчик сигнала для успешного угадывания
-void handle_correct_guess(int sig) {
-    guessed = 1;
-}
-
-// Обработчик сигнала для неверного угадывания
-void handle_incorrect_guess(int sig) {
-    guessed = 0;
-}
-
-// Функция для первого игрока (загадать число)
-void player_one(int n) {
-    srand(time(NULL));
-    int secret_number = rand() % n + 1; // Загадать число от 1 до N
-    printf("Игрок 1 загадал число: %d\n", secret_number);
-    
-    // Отправляем загаданное число второму игроку через сигнал
-    kill(getppid(), SIGUSR1); // Уведомление о начале игры
-
-    while (1) {
-        pause(); // Ожидание сигнала от второго игрока
-        
-        if (guessed) {
-            printf("Игрок 1: Игрок 2 угадал число %d!\n", secret_number);
-            break; // Выход из цикла, если угадано
-        } else {
-            printf("Игрок 1: Игрок 2 не угадал. Загаданное число было %d.\n", secret_number);
-        }
-        
-        // Меняем местами игроков и начинаем новую игру
-        sleep(1); // Небольшая пауза перед новой игрой
-        secret_number = rand() % n + 1; // Новое загаданное число
-        printf("Игрок 1 загадал новое число: %d\n", secret_number);
+void handler_result(int sig) {
+    if (sig == SIGUSR1) {
+        printf("Игрок 2 угадал число %d!\n", secret_number);
+        printf("Количество попыток: %d\n", attempts);
+        exit(0); // Завершить процесс после успешного угадывания
+    } else if (sig == SIGUSR2) {
+        printf("Игрок 2 не угадал. Попробуйте снова.\n");
     }
-}
-
-// Функция для второго игрока (угадать число)
-void player_two(int n) {
-    int attempts = 0;
-    srand(time(NULL) ^ getpid()); // Инициализация генератора случайных чисел
-
-    while (1) {
-        attempts++;
-        guess = rand() % n + 1; // Генерация предположения
-        
-        printf("Игрок 2: Я думаю, что это %d\n", guess);
-        
-        // Отправляем сигнал в зависимости от того, угадали ли мы или нет
-        if (guess == guess) {
-            kill(getppid(), SIGUSR1); // Угадали
-            break;
-        } else {
-            kill(getppid(), SIGUSR2); // Не угадали
-        }
-        
-        pause(); // Ожидание ответа от первого игрока
-    }
-    
-    printf("Игрок 2: Я угадал число %d за %d попыток!\n", guess, attempts);
 }
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         fprintf(stderr, "Использование: %s <N>\n", argv[0]);
-        return EXIT_FAILURE;
+        return 1;
     }
 
-    int n = atoi(argv[1]);
+    int N = atoi(argv[1]);
+    int player_turn = 2;
     
-    if (n <= 0) {
-        fprintf(stderr, "N должно быть положительным числом.\n");
-        return EXIT_FAILURE;
-    }
+    srand(time(NULL)); // Инициализация генератора случайных чисел
 
-    signal(SIGUSR1, handle_correct_guess);
-    signal(SIGUSR2, handle_incorrect_guess);
+    for (int game = 0; game < 10; game++) { // 10 игр
+        secret_number = rand() % N + 1; // Генерация случайного числа от 1 до N
+        printf("Игрок 1 загадывает число: %d\n", secret_number);
 
-    pid_t pid = fork();
+        child_pid = fork();
+        
+        if (child_pid < 0) {
+            perror("Ошибка fork");
+            exit(1);
+        } else if (child_pid == 0) { // Процесс игрока 2
+            signal(SIGUSR1, handler_result);
+            signal(SIGUSR2, handler_result);
 
-    if (pid < 0) {
-        perror("Ошибка при создании процесса");
-        return EXIT_FAILURE;
-    }
+            attempts = 0; // Сброс количества попыток
+            int guess;
+            while (1) {
+                guess = rand() % N + 1; // Генерация случайного предположения от 1 до N
+                attempts++; // Увеличиваем счетчик попыток
+                printf("Игрок 2 пытается угадать: %d\n", guess);
 
-    if (pid == 0) { // Второй игрок
-        player_two(n);
-    } else { // Первый игрок
-        player_one(n);
-        wait(NULL); // Ожидание завершения второго процесса
-    }
+                // Отправляем сигнал о том, что игрок 2 сделал предположение
+                if (guess == secret_number) {
+                    kill(getppid(), SIGUSR1); // Угадал
+                } else {
+                    kill(getppid(), SIGUSR2); // Не угадал
+                }
 
-    return EXIT_SUCCESS;
+                pause(); // Ожидание сигнала
+            }
+            exit(0);
+        } 
+        else { // Процесс игрока 1
+            signal(SIGUSR1, handler_result);
+            signal(SIGUSR2, handler_result);
+            while(1) {
+                pause(); // Ожидание сигнала от игрока 2
+                if (waitpid(child_pid, NULL, WNOHANG) > 0) {
+                    break; // Если процесс игрока 2 завершился, выходим из цикла
+                }
+            } 
+            printf("Игра %d завершена.\n", game + 1);
+        }
+
+        // Меняем местами игроков
+        player_turn = (player_turn == 1) ? 2 : 1; // Меняем местами
+ 
+        }
+    return 0;
 }
