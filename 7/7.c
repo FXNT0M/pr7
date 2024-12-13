@@ -2,80 +2,146 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <locale.h>
 
-int secret_number;
-pid_t child_pid;
-int attempts; // Переменная для отслеживания количества попыток
+// Флаг для обозначения, что число угадано
+volatile sig_atomic_t guessed = 0;
+// Указатель на загаданное число
+int *secret_number;
+// Количество попыток
+int *attempts;
 
-void handler_result(int sig) {
-    if (sig == SIGUSR1) {
-        printf("Игрок 2 угадал число %d!\n", secret_number);
-        printf("Количество попыток: %d\n", attempts);
-        exit(0); // Завершить процесс после успешного угадывания
-    } else if (sig == SIGUSR2) {
-        printf("Игрок 2 не угадал. Попробуйте снова.\n");
+void signal_handler(int signum) {
+    if (signum == SIGUSR1) {
+        guessed = 1;
+    }
+}
+
+void player_one(int N) {
+    // Cоздает уникальное значение для инициализации генератора случайных чисел.
+    srand(time(NULL) + getpid()); 
+
+    while (1) {
+        // Загадываем число
+        *secret_number = rand() % N + 1; 
+        printf("Игрок 1 загадал число от 1 до %d: %d\n", N, *secret_number);
+
+        guessed = 0;
+        *attempts = 0;
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        }
+
+        if (pid == 0) {
+            // Дочерний процесс: игрок 2
+            int guess;
+            while (1) {
+                (*attempts)++;
+                // Угадываем случайное число
+                guess = rand() % N + 1; 
+                printf("Игрок 2 предполагает: %d\n", guess);
+
+                if (guess == *secret_number) {
+                    printf("Игрок 2: Я угадал число за %d попыток!\n", *attempts);
+                    kill(getppid(), SIGUSR1);
+                    exit(EXIT_SUCCESS);
+                }
+            }
+        } else {
+            // Родительский процесс: игрок 1
+            while (!guessed) {
+                // Ждём завершения процесса игрока 2
+                wait(NULL); 
+            }
+            printf("Игрок 1: Игрок 2 угадал число %d за %d попыток.\n", *secret_number, *attempts);
+            break;
+        }
+    }
+}
+
+void player_two(int N) {
+    srand(time(NULL) + getpid());
+
+    while (1) {
+        // Загадываем число
+        *secret_number = rand() % N + 1; 
+        printf("Игрок 2 загадал число от 1 до %d: %d\n", N, *secret_number);
+
+        guessed = 0;
+        *attempts = 0;
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        }
+
+        if (pid == 0) {
+            // Дочерний процесс: игрок 1
+            int guess;
+            while (1) {
+                (*attempts)++;
+                // Угадываем случайное число
+                guess = rand() % N + 1; 
+                printf("Игрок 1 предполагает: %d\n", guess);
+
+                if (guess == *secret_number) {
+                    printf("Игрок 1: Я угадал число за %d попыток!\n", *attempts);
+                    kill(getppid(), SIGUSR1);
+                    exit(EXIT_SUCCESS);
+                }
+            }
+        } else {
+            // Родительский процесс: игрок 2
+            while (!guessed) {
+                // Ждём завершения процесса игрока 1
+                wait(NULL); 
+            }
+            printf("Игрок 2: Игрок 1 угадал число %d за %d попыток.\n", *secret_number, *attempts);
+            break;
+        }
     }
 }
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         fprintf(stderr, "Использование: %s <N>\n", argv[0]);
-        return 1;
+        exit(EXIT_FAILURE);
     }
 
     int N = atoi(argv[1]);
-    int player_turn = 2;
-    
-    srand(time(NULL)); // Инициализация генератора случайных чисел
+    if (N <= 0) {
+        fprintf(stderr, "N должно быть положительным числом.\n");
+        exit(EXIT_FAILURE);
+    }
 
-    for (int game = 0; game < 10; game++) { // 10 игр
-        secret_number = rand() % N + 1; // Генерация случайного числа от 1 до N
-        printf("Игрок 1 загадывает число: %d\n", secret_number);
+    setlocale(LC_ALL, "ru_RU");
 
-        child_pid = fork();
-        
-        if (child_pid < 0) {
-            perror("Ошибка fork");
-            exit(1);
-        } else if (child_pid == 0) { // Процесс игрока 2
-            signal(SIGUSR1, handler_result);
-            signal(SIGUSR2, handler_result);
+    // Создаем общую память для хранения загаданного числа и количества попыток
+    secret_number = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    attempts = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (secret_number == MAP_FAILED || attempts == MAP_FAILED) {
+        perror("mmap");
+        exit(EXIT_FAILURE);
+    }
 
-            attempts = 0; // Сброс количества попыток
-            int guess;
-            while (1) {
-                guess = rand() % N + 1; // Генерация случайного предположения от 1 до N
-                attempts++; // Увеличиваем счетчик попыток
-                printf("Игрок 2 пытается угадать: %d\n", guess);
+    signal(SIGUSR1, signal_handler);
 
-                // Отправляем сигнал о том, что игрок 2 сделал предположение
-                if (guess == secret_number) {
-                    kill(getppid(), SIGUSR1); // Угадал
-                } else {
-                    kill(getppid(), SIGUSR2); // Не угадал
-                }
+    while (1) {
+        printf("\n--- Игра между игроками 1 и 2 ---\n");
+        player_one(N);
 
-                pause(); // Ожидание сигнала
-            }
-            exit(0);
-        } 
-        else { // Процесс игрока 1
-            signal(SIGUSR1, handler_result);
-            signal(SIGUSR2, handler_result);
-            while(1) {
-                pause(); // Ожидание сигнала от игрока 2
-                if (waitpid(child_pid, NULL, WNOHANG) > 0) {
-                    break; // Если процесс игрока 2 завершился, выходим из цикла
-                }
-            } 
-            printf("Игра %d завершена.\n", game + 1);
-        }
+        printf("\n--- Игра между игроками 2 и 1 ---\n");
+        player_two(N);
+    }
 
-        // Меняем местами игроков
-        player_turn = (player_turn == 1) ? 2 : 1; // Меняем местами
- 
-        }
+    munmap(secret_number, sizeof(int));
+    munmap(attempts, sizeof(int));
     return 0;
 }
