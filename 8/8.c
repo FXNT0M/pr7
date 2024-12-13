@@ -1,62 +1,77 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <locale.h>
+#include <stdbool.h>
 
-#define BUFFER_SIZE 10
+#define MAX_ATTEMPTS 100 // Limit the number of attempts
 
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Использование: %s <N>\n", argv[0]);
-        return 1;
-    }
+    if (argc != 2) {
+        fprintf(stderr, "Использование: %s <N>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+    int N = atoi(argv[1]);
+    if (N <= 0) {
+        fprintf(stderr, "N должно быть положительным числом.\n");
+        exit(EXIT_FAILURE);
+    }
+    setlocale(LC_ALL, "ru_RU");
 
-    int N = atoi(argv[1]);
-    if (N <= 0) {
-        fprintf(stderr, "N должно быть положительным числом.\n");
-        return 1;
-    }
+    for (int game = 1; game <= 2; ++game) {
+        int secret_number;
+        int attempts = 0;
+        int guess;
+        int pipefd[2];
+        bool used_numbers[N + 1];
 
-    int pipe_fd[2];
-    pipe(pipe_fd);
+        if (pipe(pipefd) == -1) {
+            perror("pipe");
+            exit(EXIT_FAILURE);
+        }
 
-    for (int i = 0; i < 10; i++) { // 10 циклов
-        pid_t pid = fork();
-        if (pid < 0) {
-            perror("Ошибка fork");
-            exit(1);
-        }
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        } else if (pid == 0) { // Child process (Guesser)
+            close(pipefd[1]);
+            srand(time(NULL) + getpid());
+            for (int i = 0; i <= N; ++i) used_numbers[i] = false;
 
-        if (pid == 0) { // Второй игрок
-            close(pipe_fd[1]); // Закрываем запись в канале
+            while (attempts < MAX_ATTEMPTS) {
+                read(pipefd[0], &secret_number, sizeof(int));
+                do {
+                    guess = rand() % N + 1;
+                } while (used_numbers[guess]);
+                used_numbers[guess] = true;
 
-            int guess;
-            while (read(pipe_fd[0], &guess, sizeof(guess)) > 0) {
-                printf("Введите ваше предположение (от 1 до %d): ", N);
-                scanf("%d", &guess);
-
-                write(pipe_fd[1], &guess, sizeof(guess)); // Отправляем предположение
-                if (guess == N) { // Угадал
-                    printf("Второй игрок угадал число %d!\n", N);
-                    break;
-                } else {
-                    printf("Попытка угадать число %d не удалась.\n", guess);
-                }
-            }
-            close(pipe_fd[0]);
-            exit(0);
-        } else { // Первый игрок
-            close(pipe_fd[0]); // Закрываем чтение из канала
-
-            int secret_number = rand() % N + 1;
-            printf("Первый игрок загадал число: %d\n", secret_number);
-
-            write(pipe_fd[1], &secret_number, sizeof(secret_number)); // Отправляем загаданное число
-
-            wait(NULL); // Ожидание завершения второго процесса
-            close(pipe_fd[1]);
-        }
-    }
-
-    return 0;
+                printf("Игрок %d предполагает: %d\n", (game == 1) ? 2 : 1, guess);
+                if (guess == secret_number) {
+                    printf("Игрок %d: Я угадал число за %d попыток!\n", (game == 1) ? 2 : 1, ++attempts);
+                    break;
+                }
+                attempts++;
+            }
+            if (attempts == MAX_ATTEMPTS) {
+                printf("Игрок %d: Не смог угадать число за %d попыток.\n", (game == 1) ? 2 : 1, attempts);
+            }
+            close(pipefd[0]);
+            exit(attempts); // Return the number of attempts
+        } else { // Parent process (Number Chooser)
+            close(pipefd[0]);
+            srand(time(NULL) + getpid());
+            secret_number = rand() % N + 1;
+            printf("Игрок %d загадал число от 1 до %d: %d\n", game, N, secret_number);
+            write(pipefd[1], &secret_number, sizeof(int));
+            close(pipefd[1]);
+            int status;
+            wait(&status); // Wait for child process and get exit status
+            int attempts_made = WEXITSTATUS(status); // Extract the number of attempts
+            printf("Игрок %d: Игрок %d угадал (или не угадал) число за %d попыток.\n", game, (game == 1) ? 2 : 1, attempts_made);
+        }
+    }
+    return 0;
 }
